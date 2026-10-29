@@ -1,7 +1,7 @@
 export const WIDTH = 96;
 export const HEIGHT = 16;
 export const PIXEL_COUNT = WIDTH * HEIGHT;
-export const MAX_FXD_FRAMES = 32;
+export const MAX_FXD_FRAMES = 65535;
 export const COLOR_COUNT = 8;
 
 export type Frame = {

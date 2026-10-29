@@ -11,11 +11,10 @@ indices `0–7` occur, even though the companion GIF has a 16-color table.
 | Dimensions              | 96 (width) × 16 (height) pixels                     |
 | Pixel storage           | 4 bits per pixel, two pixels per byte (4bpp packed) |
 | Endianness              | Little-endian                                       |
-| File type               | Custom binary format; no ASCII magic at start       |
-| Frame count (sample)    | 32                                                  |
+| Frame count             | Stored as u16; format cap is 65,535 (no 32-frame limit) |
 | Frame size (sample)     | 768 bytes (`0x300`) per frame                       |
 | Frame duration (sample) | 250 ms (global)                                     |
-| File size (sample)      | `0x6A10` (27,152 bytes)                             |
+| File size (sample)      | `0x6A10` (27,152 bytes) for 32 frames; grows linearly |
 
 ## Hardware Display Palette (8 colors)
 
@@ -44,33 +43,63 @@ The 16-color table below belongs to the companion preview GIF
 
 ## File Layout Summary
 
+A file contains either a single program (the classic 32-frame sample) or a
+multi-program container (the `86-86-12-6.FXD` sample has four programs). Each
+program uses the same internal layout; only its position in the file differs.
+For a single-program export the header is fixed at `0x334` and all later
+offsets are computed from the slot count `N`:
+
+```
+marker             = 0x03A4 + N * 8          (index array + N entries, then 0x00040100)
+descriptor_table   = marker + 8
+first_frame        = descriptor_table + N * 0x28 - 8   (last descriptor's +0x20 overlaps frame 0)
+frame_data         = first_frame + N * 0x300
+footer             = frame_data                 (0x6C bytes)
+eof                = footer + 0x6C
+```
+
+For the classic 32-frame file this resolves to the fixed offsets below.
+
 ```mermaid
 packet
-title USB.FXD File Layout (0x0000 - 0x6A0F)
+title USB.FXD File Layout, single program with N slots (0x0000 - EOF)
 0-255: "Main Header (0x0000-0x01FF)"
 256-819: "Metadata/TOC (0x0200-0x0333)"
 820-863: "Animation Header (0x0334-0x0360)"
-864-1187: "Padding/Unknown (0x0361-0x04AB)"
-1188-2467: "Frame Index Array (0x03A4-0x04A3)"
-2468-2468: "Marker 0x00040100 (0x04A4-0x04A7)"
-2469-2469: "Padding (0x04A8-0x04AB)"
-2470-2470: "Frame Descriptor Table (0x04AC-0x09A3, 32×0x28)"
-2471-2471: "Frame Data (0x09A4-0x69A3, 32×0x300)"
-2472-2472: "Footer (0x69A4-0x6A0F, 0x6C bytes)"
+864-?: "Padding/Unknown (0x0361-0x03A3)"
+?: "Frame Index Array (0x03A4 - 0x03A4+N*8-1)"
+?: "Marker 0x00040100 (4 bytes)"
+?: "Padding (4 bytes)"
+?: "Frame Descriptor Table (N x 0x28 bytes)"
+?: "Frame Data (N x 0x300 bytes)"
+?: "Footer (0x6C bytes)"
+EOF
 ```
 
 | Section                | Start    | End      | Size             | Notes                                                             |
 |------------------------|----------|----------|------------------|-------------------------------------------------------------------|
 | Main Header            | `0x0000` | `0x01FF` | `0x200` (512)    | Dimensions, flags, timestamp. No frame count/size.                |
 | Metadata / TOC         | `0x0200` | `0x0333` | `0x134` (308)    | Display objects, `"Affichage-1"`. Contains preview offsets.       |
-| Animation Header       | `0x0334` | `0x0360` | `0x2D` (45)      | Contains frame count, last index, delay.                          |
-| (Padding/unknown)      | `0x0361` | `0x04AB` | `0x14B` (331)    | Mostly zeroed.                                                    |
-| Frame Index Array      | `0x03A4` | `0x04A3` | `0x100` (256)    | 32 × 8-byte entries (see below).                                  |
-| Marker                 | `0x04A4` | `0x04A7` | 4                | `0x00040100`                                                      |
-| (Padding)              | `0x04A8` | `0x04AB` | 4                | Zero                                                              |
-| Frame Descriptor Table | `0x04AC` | `0x09A3` | `0x4F8` (1272)   | 32 × 40-byte (`0x28`) records. Last record has no 8-byte trailer. |
-| Frame Data             | `0x09A4` | `0x69A3` | `0x6000` (24576) | 32 × 768-byte frames, 4bpp packed.                                |
-| Footer                 | `0x69A4` | `0x6A0F` | `0x6C` (108)     | Bitmap/object fields, `"Programme0"`, `"Animation0"`.             |
+| Animation Header       | `0x0334` | `0x0360` | `0x2D` (45)      | Contains frame count and delay (ms + 8 ms units).                 |
+| (Padding/unknown)      | `0x0361` | `0x03A3` | `0x43` (67)      | Mostly zeroed.                                                    |
+| Frame Index Array      | `0x03A4` | `0x03A4+N*8-1` | `N*8`     | `N` × 8-byte entries (`0x00010000 + i`).                          |
+| Marker                 | `0x03A4+N*8` | `+3`  | 4                | `0x00040100`                                                      |
+| (Padding)              | `+4`     | `+7`    | 4                | Zero                                                              |
+| Frame Descriptor Table | `marker+8` | `+N*0x28-1` | `N*0x28` | `N` × 40-byte records; last record's +0x20 overlaps frame 0.      |
+| Frame Data             | `first_frame` | `+N*0x300-1` | `N*0x300` | `N` × 768-byte frames, 4bpp packed.                               |
+| Footer                 | `frame_data_end` | `+0x6B` | `0x6C` (108) | Bitmap/object fields, `"Programme0"`, `"Animation0"`.             |
+
+For N=32 the fixed offsets are:
+
+| Section                | Start    | End      | Size             |
+|------------------------|----------|----------|------------------|
+| Frame Index Array      | `0x03A4` | `0x04A3` | `0x100` (256)    |
+| Marker                 | `0x04A4` | `0x04A7` | 4                |
+| (Padding)              | `0x04A8` | `0x04AB` | 4                |
+| Frame Descriptor Table | `0x04AC` | `0x09A3` | `0x4F8` (1272)   |
+| Frame Data             | `0x09A4` | `0x69A3` | `0x6000` (24576) |
+| Footer                 | `0x69A4` | `0x6A0F` | `0x6C` (108)     |
+| EOF                    | `0x6A10` | —        | —                |
 
 ## 1) Main Header (0x0000–0x01FF)
 
@@ -171,7 +200,7 @@ title Animation Header (0x0334 - 0x0360)
 176-191: "Frame count=32 (0x0020)"
 192-207: "Unknown (0x000C)"
 208-223: "Unknown (0x0100)"
-224-239: "Last index=31 (0x001F)"
+224-239: "Delay in 8 ms units=31 (0x001F)"
 240-255: "Delay ms=250 (0x00FA)"
 256-287: "Unknown (0x00000001)"
 288-319: "Unknown (0x00000002)"
@@ -188,15 +217,34 @@ title Animation Header (0x0334 - 0x0360)
 | `0x344` | 4    | u32/le | `16`                | Row count                             |
 | `0x348` | 2    | u16/le | `0`                 | Unknown                               |
 | `0x34A` | 2    | u16/le | **`32`**            | **Frame count**                       |
-| `0x34C` | 2    | u16/le | `12`                | Unknown                               |
-| `0x34E` | 2    | u16/le | `256` (`0x0100`)    | Unknown                               |
-| `0x350` | 2    | u16/le | **`31`**            | **Last frame index (0-based)**        |
+| `0x34C` | 2    | u16/le | `12`                | Unknown (constant `12`)               |
+| `0x34E` | 2    | u16/le | `256` (`0x0100`)    | Unknown (constant `256`)              |
+| `0x350` | 2    | u16/le | **`31`**            | **Delay in 8 ms units (`delay_ms / 8`)** |
 | `0x352` | 2    | u16/le | **`250`**           | **Frame duration in ms (global)**     |
 | `0x354` | 4    | u32/le | `1`                 | Unknown                               |
 | `0x358` | 4    | u32/le | `2`                 | Unknown                               |
 | `0x35C` | 4    | u32/le | `3`                 | Unknown                               |
 
 The `250` ms value matches the GIF (all frames 0.25 s). USB.FXD stores one global delay for the whole animation.
+
+**Note on `0x350` (`+0x1C` from the animation header):** This field was
+originally identified as the 0-based last frame index (`N-1`). Scanning the
+multi-program sample `86-86-12-6.FXD` disproves that: the value tracks the frame
+delay, not the frame count. It is a second, coarser copy of the delay expressed
+in 8 ms units, i.e. `delay_ms / 8` (integer division):
+
+| Program          | Frame count (`0x34A`) | Delay ms (`0x352`) | `0x350` value |
+|------------------|-----------------------|--------------------|---------------|
+| classic 32-frame | 32                    | 250                | 31            |
+| P0               | 86                    | 250                | 31            |
+| P1               | 86                    | 250                | 31            |
+| P2               | 12                    | 83                 | 10            |
+| P3               | 6                     | 200                | 25            |
+
+`floor(250 / 8) = 31`, `floor(83 / 8) = 10`, and `floor(200 / 8) = 25`, so the
+field is not capped at 31 and has nothing to do with the last frame index. The
+millisecond field at `0x352` is authoritative; the 8 ms copy loses precision
+when the delay is not a multiple of 8 (e.g. 83 ms -> 10).
 
 ## 4) Frame Directory
 
@@ -376,19 +424,105 @@ title Footer (0x69A4 - 0x6A0F)
 | `0x69FC` | 20   | UTF-16LE | `"Animation0"`            | Object name                                |
 | `0x6A10` | —    | —        | EOF                       | End of file                                |
 
+## 7) Multi-Program Containers
+
+Some vendor files (e.g. `86-86-12-6.FXD`, 146,096 bytes) contain several
+animation programs/scenes in one container. The main header still reports the
+first program's dimensions (96×16 in the sample), but each program has its own
+animation header, index array, marker, descriptor table, and frame data laid out
+using the dynamic formulas above.
+
+The four numbers in the filename are exactly the four programs' used frame
+counts: `86`, `86`, `12`, `6`. This was verified both from the animation-header
+count field (`+0x16`, authoritative) and from the number of index/descriptor
+slots; in this file every program has `slots == used frames` (no 32-slot
+padding). The file therefore contains 190 frames in total.
+
+| Program | Header   | Dimensions | Frames | Slots | Delay | Data End   |
+|---------|----------|------------|--------|-------|-------|------------|
+| P0      | `0x034C` | 96×16      | 86     | 86    | 250   | `0x115DC`  |
+| P1      | `0x116BC`| 96×16      | 86     | 86    | 250   | `0x2294C`  |
+| P2      | `0x22A2C`| 16×16      | 12     | 12    | 83    | `0x232DC`  |
+| P3      | `0x233BC`| 20×16      | 6      | 6     | 200   | `0x2390C`  |
+
+Verified per-program offsets (all values absolute file offsets):
+
+| Program | Header   | Index array | Marker `0x00040100` | Descriptors | First frame | Row bytes | Frame bytes | Data end   |
+|---------|----------|-------------|---------------------|-------------|-------------|-----------|-------------|------------|
+| P0      | `0x034C` | `0x03BC`    | `0x066C`            | `0x0674`    | `0x13DC`    | 48        | 768 (`0x300`) | `0x115DC` |
+| P1      | `0x116BC`| `0x1172C`   | `0x119DC`           | `0x119E4`   | `0x1274C`   | 48        | 768 (`0x300`) | `0x2294C` |
+| P2      | `0x22A2C`| `0x22A9C`   | `0x22AFC`           | `0x22B04`   | `0x22CDC`   | 8         | 128 (`0x80`)  | `0x232DC` |
+| P3      | `0x233BC`| `0x2342C`   | `0x2345C`           | `0x23464`   | `0x2354C`   | 10        | 160 (`0xA0`)  | `0x2390C` |
+
+For each program:
+
+```text
+index_array  = header + 0x70
+marker       = index_array + slots * 8
+descriptors  = marker + 8
+first_frame  = descriptors + slots * 0x28 - 8   # = marker + slots * 0x28
+data_end     = first_frame + slots * frame_bytes
+```
+
+Note that P0's header is at `0x034C`, not `0x0334`: the `0x18` bytes at
+`0x0334–0x034B` are zero padding in this container. Consequently P0's index
+array starts at `0x03BC`, not the classic fixed `0x03A4`. The single-program
+layout described earlier still starts its header at `0x0334`.
+
+Per-program layout (relative to each program's header):
+
+| Offset | Size | Type   | Meaning                                |
+|--------|------|--------|----------------------------------------|
+| `+0x00`| 4    | u32/le | `14`                                   |
+| `+0x04`| 4    | u32/le | `0`                                    |
+| `+0x08`| 2    | u16/le | Width                                  |
+| `+0x0A`| 2    | u16/le | Height                                 |
+| `+0x0C`| 4    | u32/le | Descriptor size (`40`)                 |
+| `+0x10`| 4    | u32/le | Row count                              |
+| `+0x14`| 2    | u16/le | `0`                                    |
+| `+0x16`| 2    | u16/le | Frame count                            |
+| `+0x18`| 2    | u16/le | Constant `12`                          |
+| `+0x1A`| 2    | u16/le | Constant `256`                         |
+| `+0x1C`| 2    | u16/le | Delay in 8 ms units (`delay_ms / 8`)   |
+| `+0x1E`| 2    | u16/le | Delay ms                               |
+| `+0x20`| 4    | u32/le | `1`                                    |
+| `+0x24`| 4    | u32/le | `2`                                    |
+| `+0x28`| 4    | u32/le | `3`                                    |
+
+Index array at `header + 0x70`, marker `0x00040100` at `index + count*8`,
+descriptors at `marker + 8`, frame data at `marker + count*0x28` (the last
+descriptor's 8-byte trailer is omitted).
+
+Between programs, a per-program metadata block precedes each header (except P0,
+which uses the main metadata at `0x0200`). The metadata block is `0xE0` bytes and
+contains an animation descriptor for the next program followed by a second
+display descriptor at `+0x68`. The blocks are at `0x115DC` (before P1),
+`0x2294C` (before P2), and `0x232DC` (before P3); each starts exactly at the
+previous program's data end.
+
+The file ends at `0x23AB0` (`146,096` bytes). Its final footer block spans
+`0x2390C–0x23AAF` (`0x1A4` bytes): four `0x2C`-byte footer records (`0xB0`)
+followed by four name records (`0x40 + 3*0x3C = 0xF4`), each holding
+`"ProgrammeN"` and `"Animation0"`.
+
+**Import policy:** The editor imports the first program matching 96×16 (the
+sample's first program has 86 frames). Smaller programs (16×16, 20×16) are
+skipped because the editor canvas cannot represent them. Re-export writes a
+single-program file.
+
 ## Decoding Recipe
 
 ```text
 width       = u16 at 0x08
 height      = u16 at 0x0A
-count       = u16 at 0x34A
-delay_ms    = u16 at 0x352        # global
-row_bytes   = u16 at descriptor0 + 0x04  # 48
-frame_bytes = u32 at descriptor0 + 0x08  # 768
-first_frame = descriptor0_offset + 0x200 # 0x09A4
+count       = u16 at animation_header + 0x16   # 0x34A for the classic sample
+delay_ms    = u16 at animation_header + 0x1E   # 0x352 for the classic sample
+row_bytes   = u16 at descriptor0 + 0x04        # 48
+frame_bytes = u32 at descriptor0 + 0x08        # 768
+first_frame = u32 at descriptor0 + 0x0C + 0x200  # 0x09A4 for the classic sample
 
 for i in 0..count:
-    descriptor = 0x04AC + i*0x28
+    descriptor = descriptor0 + i*0x28
     stored     = u32 at descriptor + 0x0C
     frame_off  = stored + 0x200
     for y in 0..height:
@@ -488,17 +622,17 @@ The footer is 108 bytes (`0x6C`):
 ```text
 width       = u16 at 0x08
 height      = u16 at 0x0A
-count       = u16 at 0x34A
-delay_ms    = u16 at 0x352
-row_bytes   = u16 at descriptor0 + 0x04      # 48
-frame_bytes = u32 at descriptor0 + 0x08      # 768
-first_frame = descriptor0_offset + 0x200     # 0x9A4
+count       = u16 at animation_header + 0x16   # 0x34A for the classic sample
+delay_ms    = u16 at animation_header + 0x1E   # 0x352 for the classic sample
+row_bytes   = u16 at descriptor0 + 0x04        # 48
+frame_bytes = u32 at descriptor0 + 0x08        # 768
+first_frame = u32 at descriptor0 + 0x0C + 0x200  # 0x09A4 for the classic sample
 
-for i in 0..count-1:
-    descriptor = 0x4AC + i*0x28
+for i in 0..count:
+    descriptor = descriptor0 + i*0x28
     stored     = u32 at descriptor + 0x0C
     frame_off  = stored + 0x200
-    for y in 0..height-1:
+    for y in 0..height:
         row = data[frame_off + y*row_bytes : frame_off + (y+1)*row_bytes]
         for byte in row:
             emit(byte >> 4)
@@ -543,7 +677,7 @@ found in the sections examined. Only indices 0–7 occur in this sample.
 2. **Padding** (0x004C–0x01FF).
 3. **Metadata/TOC** (0x0200–0x0333): display objects and `"Affichage-1"`.
 4. **Animation header** (0x0334–0x0360): width/height, descriptor size, frame
-   count (32), last index (31), frame delay (250 ms).
+   count (32), frame delay (250 ms; `31` in the 8 ms-unit field).
 5. **Frame index array** (0x03A4–0x04A3): 32 entries.
 6. **Frame descriptor table** (0x04AC–0x09A3): 32 × 40-byte records; the last
    record has no trailer because frame data starts at its trailer position.

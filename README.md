@@ -94,10 +94,13 @@ All request and response bodies are JSON. Binary payloads are base64 strings.
 
 Errors use an HTTP 4xx/5xx status and `{ "error": "message" }`.
 
-The server enforces the USB.FXD limit of 32 frames. USB.FXD stores a single
-global frame delay, so the exporter represents per-frame durations by repeating
-frames using their common divisor when the expanded timeline fits in 32 slots;
-otherwise it picks the delay that minimizes the total timing error.
+The server accepts up to 65,535 USB.FXD frames. USB.FXD stores a single global
+frame delay, so the exporter represents per-frame durations by repeating frames
+using their common divisor when the expanded timeline fits in the slot limit;
+otherwise it picks the delay that minimizes the total timing error. Files with
+32 or fewer frames keep the historical 32-slot layout. Multi-program containers
+are supported for import: the editor loads the first 96×16 program and
+re-exports it as a single-program file.
 
 ## Tests
 
