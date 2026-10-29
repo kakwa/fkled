@@ -1,4 +1,5 @@
 use crate::model::{Animation, Frame};
+use crate::palette::{self, Palette};
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, Timelike};
 use std::fs::File;
@@ -69,9 +70,12 @@ fn pack_frame(frame: &Frame, out: &mut [u8]) {
     debug_assert_eq!(out.len(), FRAME_BYTES);
     for row in 0..HEIGHT {
         for byte_col in 0..ROW_BYTES {
-            let high = frame.pixels[row][byte_col * 2] & 0x0F;
-            let low = frame.pixels[row][byte_col * 2 + 1] & 0x0F;
-            out[row * ROW_BYTES + byte_col] = (high << 4) | low;
+            // The panel displays the low nibble as the left pixel of each
+            // pair, so pack the even column there and the odd column in the
+            // high nibble.
+            let left = palette::normalize(frame.pixels[row][byte_col * 2]);
+            let right = palette::normalize(frame.pixels[row][byte_col * 2 + 1]);
+            out[row * ROW_BYTES + byte_col] = (right << 4) | left;
         }
     }
 }
@@ -83,8 +87,8 @@ fn decode_frame(bytes: &[u8], row_bytes: usize, frame: &mut Frame) {
             let Some(&packed) = bytes.get(row * row_bytes + byte_col) else {
                 continue;
             };
-            frame.pixels[row][byte_col * 2] = packed >> 4;
-            frame.pixels[row][byte_col * 2 + 1] = packed & 0x0F;
+            frame.pixels[row][byte_col * 2] = palette::normalize(packed & 0x0F);
+            frame.pixels[row][byte_col * 2 + 1] = palette::normalize(packed >> 4);
         }
     }
 }
@@ -229,6 +233,98 @@ fn write_footer(buf: &mut [u8]) {
     write_utf16(buf, f + 0x58, "Animation0");
 }
 
+fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    a.max(1)
+}
+
+/// USB.FXD only stores one delay for the whole animation, so per-frame
+/// durations are represented by repeating frames in the fixed 32 slots.
+///
+/// The returned indices select a source frame for every slot, and the delay is
+/// the duration of one slot. The common divisor is used when the whole
+/// animation fits; otherwise the delay that minimizes the total timing error
+/// while fitting in 32 slots is chosen.
+fn build_fxd_timeline(frames: &[Frame]) -> (Vec<usize>, u16) {
+    let durations: Vec<u32> = frames
+        .iter()
+        .map(|frame| frame.duration_ms.max(1))
+        .collect();
+
+    let gcd = durations.iter().copied().reduce(gcd_u32).unwrap_or(1);
+    let exact_slots: u64 = durations
+        .iter()
+        .map(|&duration| (duration / gcd) as u64)
+        .sum();
+    if gcd <= u16::MAX as u32 && exact_slots <= MAX_FRAMES as u64 {
+        let mut timeline = Vec::with_capacity(exact_slots as usize);
+        for (index, &duration) in durations.iter().enumerate() {
+            for _ in 0..(duration / gcd) {
+                timeline.push(index);
+            }
+        }
+        return (timeline, gcd as u16);
+    }
+
+    // More than 32 slots are needed for an exact expansion. Pick the slot
+    // delay that keeps the accumulated timing error as small as possible.
+    // A delay equal to the longest frame always fits (one slot per frame).
+    let max_delay = durations
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(1)
+        .min(u16::MAX as u32)
+        .max(1);
+    let mut best: Option<(u64, usize, u16, Vec<usize>)> = None;
+
+    for delay in 1..=max_delay {
+        let mut repeats = Vec::with_capacity(frames.len());
+        let mut slots = 0u64;
+        let mut error = 0u64;
+        let mut fits = true;
+
+        for &duration in &durations {
+            // Round to the nearest number of slots, but never drop a frame.
+            let count = ((duration as u64 + delay as u64 / 2) / delay as u64).max(1);
+            slots += count;
+            if slots > MAX_FRAMES as u64 {
+                fits = false;
+                break;
+            }
+            error += (count * delay as u64).abs_diff(duration as u64);
+            repeats.push(count as usize);
+        }
+
+        if !fits {
+            continue;
+        }
+
+        let better = match &best {
+            None => true,
+            Some((best_error, best_slots, _, _)) => {
+                error < *best_error || (error == *best_error && slots < *best_slots as u64)
+            }
+        };
+        if better {
+            let mut timeline = Vec::with_capacity(slots as usize);
+            for (index, count) in repeats.into_iter().enumerate() {
+                for _ in 0..count {
+                    timeline.push(index);
+                }
+            }
+            best = Some((error, slots as usize, delay as u16, timeline));
+        }
+    }
+
+    best.map(|(_, _, delay, timeline)| (timeline, delay))
+        .unwrap_or_else(|| ((0..frames.len()).collect(), max_delay as u16))
+}
+
 pub fn export_usb_fxd_bytes(anim: &Animation) -> Result<Vec<u8>> {
     if anim.frames.is_empty() {
         bail!("cannot export USB.FXD: animation has no frames");
@@ -240,8 +336,8 @@ pub fn export_usb_fxd_bytes(anim: &Animation) -> Result<Vec<u8>> {
         );
     }
 
-    let frame_count = anim.frames.len();
-    let delay_ms = anim.frames[0].duration_ms.clamp(1, u16::MAX as u32) as u16;
+    let (timeline, delay_ms) = build_fxd_timeline(&anim.frames);
+    let frame_count = timeline.len();
     let mut buf = vec![0u8; FILE_BYTES];
 
     // Main header.
@@ -299,10 +395,10 @@ pub fn export_usb_fxd_bytes(anim: &Animation) -> Result<Vec<u8>> {
         put_u32(&mut buf, offset + 0x24, 0);
     }
 
-    // Frame data: 0x9A4 + i*0x300. Slots beyond the used frame count repeat
+    // Frame data: 0x9A4 + i*0x300. Slots beyond the used timeline repeat
     // the last frame so the fixed 32-slot layout stays fully addressable.
     for index in 0..MAX_FRAMES {
-        let source = &anim.frames[index.min(frame_count - 1)];
+        let source = &anim.frames[timeline[index.min(frame_count - 1)]];
         let offset = FIRST_FRAME_OFFSET + index * FRAME_BYTES;
         pack_frame(source, &mut buf[offset..offset + FRAME_BYTES]);
     }
@@ -390,20 +486,22 @@ pub fn export_gif_bytes(anim: &Animation) -> Result<Vec<u8>> {
         let mut encoder = gif::Encoder::new(&mut output, 96, 16, &[])?;
         encoder.set_repeat(gif::Repeat::Infinite)?;
 
+        let palette = Palette::default();
+        let palette_vec: Vec<u8> = palette
+            .colors
+            .iter()
+            .flat_map(|&(r, g, b)| [r, g, b])
+            .collect();
+
         for frame in &anim.frames {
             let mut frame_data: Vec<u8> = vec![0u8; 96 * 16];
             for row in 0..16 {
                 for col in 0..96 {
-                    frame_data[row * 96 + col] = frame.pixels[row][col] & 0x0F;
+                    frame_data[row * 96 + col] = palette::normalize(frame.pixels[row][col]);
                 }
             }
-            let palette_vec: Vec<u8> = vec![
-                0, 0, 0, 85, 85, 85, 170, 170, 170, 255, 255, 255, 170, 0, 0, 255, 85, 85, 170, 85,
-                0, 255, 255, 85, 0, 170, 0, 85, 255, 85, 0, 170, 170, 85, 255, 255, 0, 0, 170, 85,
-                85, 255, 170, 0, 170, 255, 85, 255,
-            ];
             let mut gif_frame =
-                gif::Frame::from_palette_pixels(96, 16, frame_data, palette_vec, None);
+                gif::Frame::from_palette_pixels(96, 16, frame_data, palette_vec.clone(), None);
             gif_frame.delay = (frame.duration_ms / 10) as u16;
             encoder.write_frame(&gif_frame)?;
         }
@@ -519,7 +617,7 @@ mod tests {
         let mut anim = Animation::default();
         anim.frames[0].pixels[0][0] = 5;
         anim.frames[0].pixels[0][1] = 3;
-        anim.frames[0].pixels[0][2] = 0x0F;
+        anim.frames[0].pixels[0][2] = 0x07;
         anim.frames[0].pixels[0][3] = 0x02;
         anim.frames[0].duration_ms = 250;
 
@@ -551,9 +649,10 @@ mod tests {
             FIRST_FRAME_OFFSET
         );
 
-        // 4bpp packing: 5,3 -> 0x53 and 15,2 -> 0xF2.
-        assert_eq!(bytes[FIRST_FRAME_OFFSET], 0x53);
-        assert_eq!(bytes[FIRST_FRAME_OFFSET + 1], 0xF2);
+        // 4bpp packing: left pixel in the low nibble, right in the high
+        // nibble: columns 5,3 -> 0x35 and 7,2 -> 0x27.
+        assert_eq!(bytes[FIRST_FRAME_OFFSET], 0x35);
+        assert_eq!(bytes[FIRST_FRAME_OFFSET + 1], 0x27);
 
         // The footer must start exactly after 32 frame slots.
         assert_eq!(FOOTER_OFFSET, 0x69A4);
@@ -561,8 +660,79 @@ mod tests {
     }
 
     #[test]
+    fn test_export_preserves_per_frame_durations_by_repeating_frames() {
+        let mut anim = Animation::default();
+        anim.frames = vec![Frame::default(), Frame::default(), Frame::default()];
+        anim.frames[0].duration_ms = 500;
+        anim.frames[0].pixels[0][0] = 1;
+        anim.frames[1].duration_ms = 1000;
+        anim.frames[1].pixels[0][0] = 2;
+        anim.frames[2].duration_ms = 800;
+        anim.frames[2].pixels[0][0] = 3;
+
+        let path = "/tmp/ledfx_editor_variable_durations.fxd";
+        export_usb_fxd(&anim, path).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+
+        // 500, 1000 and 800 ms share a 100 ms divisor, i.e. 5 + 10 + 8 slots.
+        assert_eq!(get_u16(&bytes, 0x34A).unwrap(), 23);
+        assert_eq!(get_u16(&bytes, 0x350).unwrap(), 22);
+        assert_eq!(get_u16(&bytes, 0x352).unwrap(), 100);
+
+        let exported_colors: Vec<u8> = (0..23)
+            .map(|index| bytes[FIRST_FRAME_OFFSET + index * FRAME_BYTES] & 0x0F)
+            .collect();
+        let expected: Vec<u8> = (0..5)
+            .map(|_| 1)
+            .chain((0..10).map(|_| 2))
+            .chain((0..8).map(|_| 3))
+            .collect();
+        assert_eq!(exported_colors, expected);
+    }
+
+    #[test]
+    fn test_fxd_timeline_falls_back_when_exact_expansion_is_too_large() {
+        let frames: Vec<Frame> = (0..MAX_FRAMES)
+            .map(|index| {
+                let mut frame = Frame::default();
+                frame.duration_ms = 100 + index as u32 * 10;
+                frame
+            })
+            .collect();
+
+        let (timeline, delay) = build_fxd_timeline(&frames);
+
+        // All 32 source frames must remain, each occupying one slot.
+        assert_eq!(timeline.len(), MAX_FRAMES);
+        assert_eq!(timeline, (0..MAX_FRAMES).collect::<Vec<_>>());
+        assert!(delay >= 1);
+
+        // The chosen delay should make the exported timeline as close as
+        // possible to the requested total duration.
+        let total: u64 = frames.iter().map(|frame| frame.duration_ms as u64).sum();
+        let exported = timeline.len() as u64 * delay as u64;
+        assert!(total.abs_diff(exported) < total / 10);
+    }
+
+    #[test]
+    fn test_fxd_timeline_keeps_all_frames_when_durations_exceed_u16() {
+        let frames: Vec<Frame> = (0..MAX_FRAMES)
+            .map(|_| {
+                let mut frame = Frame::default();
+                frame.duration_ms = 100_000;
+                frame
+            })
+            .collect();
+
+        let (timeline, delay) = build_fxd_timeline(&frames);
+
+        assert_eq!(timeline.len(), MAX_FRAMES);
+        assert_eq!(delay, u16::MAX);
+    }
+
+    #[test]
     fn test_import_observed_usb_fxd() {
-        let path = Path::new("../USB.FXD");
+        let path = Path::new("reverse/USB.FXD");
         if !path.exists() {
             return;
         }
@@ -587,7 +757,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_observed_file_preserves_layout() {
-        let source = Path::new("../USB.FXD");
+        let source = Path::new("reverse/USB.FXD");
         if !source.exists() {
             return;
         }
@@ -613,6 +783,75 @@ mod tests {
             &original[FIRST_FRAME_OFFSET..FOOTER_OFFSET]
         );
         assert_eq!(&exported[FOOTER_OFFSET..], &original[FOOTER_OFFSET..]);
+    }
+
+    #[test]
+    fn test_gif_roundtrip_preserves_per_frame_durations() {
+        let mut anim = Animation::default();
+        anim.frames = vec![Frame::default(), Frame::default(), Frame::default()];
+        anim.frames[0].duration_ms = 100;
+        anim.frames[1].duration_ms = 500;
+        anim.frames[2].duration_ms = 1000;
+
+        let path = "/tmp/ledfx_editor_durations.gif";
+        export_gif(&anim, path).unwrap();
+        let imported = import_gif(path).unwrap();
+        let durations: Vec<u32> = imported
+            .frames
+            .iter()
+            .map(|frame| frame.duration_ms)
+            .collect();
+
+        assert_eq!(durations, vec![100, 500, 1000]);
+    }
+
+    #[test]
+    fn test_pack_places_left_pixel_in_low_nibble() {
+        let mut frame = Frame::default();
+        frame.pixels[0][0] = 1; // left pixel of the first pair
+        frame.pixels[0][1] = 4; // right pixel of the first pair
+
+        let mut packed = vec![0u8; FRAME_BYTES];
+        pack_frame(&frame, &mut packed);
+        assert_eq!(packed[0], 0x41); // right << 4 | left
+
+        let mut decoded = Frame::default();
+        decode_frame(&packed, ROW_BYTES, &mut decoded);
+        assert_eq!(decoded.pixels[0][0], 1);
+        assert_eq!(decoded.pixels[0][1], 4);
+    }
+
+    #[test]
+    fn test_pack_swaps_adjacent_column_pairs() {
+        let mut frame = Frame::default();
+        for col in 0..8usize {
+            frame.pixels[0][col] = (col as u8 + 1) % 8;
+        }
+
+        let mut packed = vec![0u8; FRAME_BYTES];
+        pack_frame(&frame, &mut packed);
+
+        // Left/even column first in the low nibble, right/odd column in the
+        // high nibble. Reading the bytes high-first would show 2,1,4,3,...;
+        // the panel reads low-first and therefore shows 1,2,3,4,...
+        assert_eq!(packed[0], 0x21); // col 1=2 (high), col 0=1 (low)
+        assert_eq!(packed[1], 0x43); // col 3=4 (high), col 2=3 (low)
+        assert_eq!(packed[2], 0x65); // col 5=6 (high), col 4=5 (low)
+        assert_eq!(packed[3], 0x07); // col 7=0 (high), col 6=7 (low)
+    }
+
+    #[test]
+    fn test_export_normalizes_unsupported_colors_to_black() {
+        let mut anim = Animation::default();
+        anim.frames[0].pixels[0][0] = 8;
+        anim.frames[0].pixels[0][1] = 15;
+
+        let path = "/tmp/ledfx_editor_unsupported_colors.fxd";
+        export_usb_fxd(&anim, path).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+
+        // Both unsupported indices become black (index 0), packed as 0x00.
+        assert_eq!(bytes[FIRST_FRAME_OFFSET], 0x00);
     }
 
     #[test]

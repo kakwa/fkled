@@ -1,9 +1,13 @@
 # LEDFX Editor
 
 A browser editor for 96×16 LED-panel animations. The UI is React + TypeScript
-(Vite); the Rust server owns USB.FXD/GIF import/export and PCF font parsing.
+(Vite); the Rust server owns USB.FXD/GIF import/export and BDF font parsing.
 Everything between the browser and the server is JSON — there is no WebAssembly
 build anymore.
+
+The panel has an 8-colour hardware palette: black, red, green, yellow, blue,
+magenta, cyan and white (indices 0–7). The index bits are BGR. Values 8–15 are
+not displayable and are normalized to black on import, export and rendering.
 
 ## Architecture
 
@@ -12,7 +16,8 @@ build anymore.
 | `frontend/` | Vite + React + TypeScript editor |
 | `src/model.rs` | Project/animation JSON model |
 | `src/export.rs` | USB.FXD and GIF import/export (server-side) |
-| `src/pcf.rs` | PCF font parser (server-side) |
+| `src/bdf.rs` | BDF font parser and text renderer (server-side) |
+| `src/font.rs` | Shared JSON font model and BDF detection |
 | `src/serve.rs` | Static file server + JSON API |
 
 The browser edits and stores the project as JSON. When the user exports, the
@@ -34,7 +39,9 @@ The project JSON format is the same as the old `.ledfx.json` format:
 }
 ```
 
-`pixels` is row-major: 16 rows × 96 columns, one palette index (0–15) per entry.
+`pixels` is row-major: 16 rows × 96 columns, one palette index per entry. The
+hardware palette uses indices 0–7 (black, red, green, yellow, blue, magenta,
+cyan, white); indices 8–15 are normalized to black.
 
 ## Running
 
@@ -83,13 +90,14 @@ All request and response bodies are JSON. Binary payloads are base64 strings.
 | `POST` | `/api/export/usb-fxd` | `{ "animation": { … } }` | `{ "filename", "mime_type", "data": "<base64 FXD>" }` |
 | `POST` | `/api/import/gif` | `{ "data": "<base64 GIF>" }` | `{ "animation": { … } }` |
 | `POST` | `/api/export/gif` | `{ "animation": { … } }` | `{ "filename", "mime_type", "data": "<base64 GIF>" }` |
-| `POST` | `/api/fonts/parse` | `{ "data": "<base64 PCF/gzip>" }` | `{ "font": { "glyphs": { … }, … } }` |
+| `POST` | `/api/fonts/parse` | `{ "data": "<base64 BDF/gzip>" }` | `{ "font": { "glyphs": { … }, … } }` |
 
 Errors use an HTTP 4xx/5xx status and `{ "error": "message" }`.
 
 The server enforces the USB.FXD limit of 32 frames. USB.FXD stores a single
-global frame delay; the exporter uses the first frame's duration, matching the
-format's behaviour.
+global frame delay, so the exporter represents per-frame durations by repeating
+frames using their common divisor when the expanded timeline fits in 32 slots;
+otherwise it picks the delay that minimizes the total timing error.
 
 ## Tests
 

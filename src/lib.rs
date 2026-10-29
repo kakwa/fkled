@@ -4,7 +4,8 @@
 //! binary over JSON. Binary formats (USB.FXD and GIF) are produced and parsed
 //! by this crate on the server.
 
+pub mod bdf;
 pub mod export;
+pub mod font;
 pub mod model;
 pub mod palette;
-pub mod pcf;

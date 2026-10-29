@@ -2,6 +2,7 @@ export const WIDTH = 96;
 export const HEIGHT = 16;
 export const PIXEL_COUNT = WIDTH * HEIGHT;
 export const MAX_FXD_FRAMES = 32;
+export const COLOR_COUNT = 8;
 
 export type Frame = {
   /** Row-major palette indices, `WIDTH * HEIGHT` entries. */
@@ -32,11 +33,15 @@ export type Glyph = {
   character_width: number;
 };
 
-export type PcfFont = {
+export type Font = {
   glyphs: Record<string, Glyph>;
   default_char: string | null;
   max_width: number;
   max_height: number;
+  /** Distance from the top of the line to the baseline. */
+  ascent: number;
+  /** Distance from the baseline to the bottom of the line. */
+  descent: number;
 };
 
 export type FilePayload = {
@@ -50,7 +55,7 @@ export type AnimationPayload = {
 };
 
 export type FontPayload = {
-  font: PcfFont;
+  font: Font;
 };
 
 export type HealthPayload = {
@@ -64,6 +69,14 @@ export type Notice = {
   text: string;
 };
 
+/**
+ * Clamp a stored palette index to the eight colors the panel supports.
+ * Unsupported values become black (index 0), the editor's background color.
+ */
+export function normalizeColor(index: number): number {
+  return Number.isInteger(index) && index >= 0 && index < COLOR_COUNT ? index : 0;
+}
+
 export function pixelIndex(row: number, col: number): number {
   return row * WIDTH + col;
 }
@@ -72,7 +85,7 @@ export function createFrame(pixels?: number[], durationMs = 100): Frame {
   const data = new Array<number>(PIXEL_COUNT).fill(0);
   if (pixels) {
     for (let index = 0; index < PIXEL_COUNT; index += 1) {
-      data[index] = (pixels[index] ?? 0) & 0x0f;
+      data[index] = normalizeColor(pixels[index] ?? 0);
     }
   }
   return { pixels: data, duration_ms: durationMs };

@@ -1,9 +1,9 @@
 import type { ChangeEvent } from 'react';
 import { PALETTE } from '../palette';
-import type { PcfFont } from '../types';
+import type { Font } from '../types';
 
 type Props = {
-  font: PcfFont | null;
+  font: Font | null;
   fontName: string | null;
   onLoadFont: (file: File) => void;
   text: string;
@@ -58,8 +58,12 @@ export function TextPanel({
       <section className="panel-section">
         <h2>Text &amp; fonts</h2>
         <label className="btn file-button full-width">
-          Load PCF font (.pcf / .pcf.gz)
-          <input type="file" accept=".pcf,.gz,application/gzip" onChange={handleFile} />
+          Load BDF font (.bdf / .bdf.gz)
+          <input
+            type="file"
+            accept=".bdf,.bdf.gz,.gz,application/gzip"
+            onChange={handleFile}
+          />
         </label>
         <p className={`font-status ${font ? 'loaded' : ''}`}>
           {font
@@ -174,7 +178,7 @@ export function TextPanel({
           Generate scrolling frames
         </button>
         <p className="hint">
-          Frames are generated in the browser from PCF glyphs returned by the
+          Frames are generated in the browser from BDF glyphs returned by the
           server.
         </p>
       </section>

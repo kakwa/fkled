@@ -1,3 +1,4 @@
+use crate::palette;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -31,12 +32,12 @@ where
     D: serde::Deserializer<'de>,
 {
     let flat: Vec<u8> = Vec::deserialize(deserializer)?;
-    let mut pixels = [[0u8; 96]; 16];
+    let mut pixels = [[palette::BLACK; 96]; 16];
     let mut idx = 0;
     for row in 0..16 {
         for col in 0..96 {
             if idx < flat.len() {
-                pixels[row][col] = flat[idx] & 0x0F;
+                pixels[row][col] = palette::normalize(flat[idx]);
             }
             idx += 1;
         }
@@ -47,7 +48,7 @@ where
 impl Default for Frame {
     fn default() -> Self {
         Self {
-            pixels: [[0u8; 96]; 16],
+            pixels: [[palette::BLACK; 96]; 16],
             duration_ms: 100,
         }
     }

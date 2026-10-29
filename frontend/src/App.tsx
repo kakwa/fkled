@@ -16,11 +16,12 @@ import {
   createAnimation,
   createFrame,
   normaliseAnimation,
+  normalizeColor,
   type Animation,
   type Clipboard,
+  type Font,
   type Frame,
   type Notice,
-  type PcfFont,
   type Tool,
 } from './types';
 
@@ -44,7 +45,7 @@ function applyBrush(
         targetCol >= 0 &&
         targetCol < WIDTH
       ) {
-        next[targetRow * WIDTH + targetCol] = color & 0x0f;
+        next[targetRow * WIDTH + targetCol] = normalizeColor(color);
       }
     }
   }
@@ -58,8 +59,8 @@ function floodFill(
   color: number,
 ): number[] {
   const start = row * WIDTH + col;
-  const target = pixels[start] ?? 0;
-  const replacement = color & 0x0f;
+  const target = normalizeColor(pixels[start] ?? 0);
+  const replacement = normalizeColor(color);
   if (target === replacement) {
     return pixels;
   }
@@ -124,7 +125,7 @@ export default function App() {
   const [currentFrame, setCurrentFrame] = useState(0);
   const [tool, setTool] = useState<Tool>('pencil');
   const [brushSize, setBrushSize] = useState(1);
-  const [selectedColor, setSelectedColor] = useState(3);
+  const [selectedColor, setSelectedColor] = useState(7);
   const [clipboard, setClipboard] = useState<Clipboard>(() => ({
     pixels: new Array<number>(PIXEL_COUNT).fill(0),
     hasData: false,
@@ -134,12 +135,12 @@ export default function App() {
   const [onionSkinning, setOnionSkinning] = useState(false);
   const [onionAlpha, setOnionAlpha] = useState(0.3);
   const [playing, setPlaying] = useState(false);
-  const [font, setFont] = useState<PcfFont | null>(null);
+  const [font, setFont] = useState<Font | null>(null);
   const [fontName, setFontName] = useState<string | null>(null);
   const [text, setText] = useState('');
   const [textX, setTextX] = useState(0);
   const [textY, setTextY] = useState(0);
-  const [textColor, setTextColor] = useState(3);
+  const [textColor, setTextColor] = useState(7);
   const [scrollText, setScrollText] = useState('');
   const [scrollSpeed, setScrollSpeed] = useState(1);
   const [scrollGap, setScrollGap] = useState(2);
@@ -454,7 +455,7 @@ export default function App() {
 
   function handleRenderText() {
     if (!font) {
-      setNotice({ kind: 'error', text: 'Load a PCF font first.' });
+      setNotice({ kind: 'error', text: 'Load a BDF font first.' });
       return;
     }
     updateCurrentFrame((activeFrame) => {
@@ -467,7 +468,7 @@ export default function App() {
 
   function handleGenerateScroll() {
     if (!font) {
-      setNotice({ kind: 'error', text: 'Load a PCF font first.' });
+      setNotice({ kind: 'error', text: 'Load a BDF font first.' });
       return;
     }
     if (!scrollText) {

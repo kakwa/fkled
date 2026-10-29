@@ -17,6 +17,31 @@ indices `0–7` occur, even though the companion GIF has a 16-color table.
 | Frame duration (sample) | 250 ms (global)                                     |
 | File size (sample)      | `0x6A10` (27,152 bytes)                             |
 
+## Hardware Display Palette (8 colors)
+
+The panel displays only 8 colors. The sample animation uses palette indices
+`0–7`; frames 0–15 are a horizontal color-bar scroll and frame 16 shows the
+same bars left to right as indices `0, 7, 1, 3, 2, 6, 4, 5`. Matching that bar
+order against the colors shown by the panel identifies the hardware palette:
+
+| Index | Color   | RGB       |
+|-------|---------|-----------|
+| 0     | Black   | `#000000` |
+| 1     | Red     | `#ff0000` |
+| 2     | Green   | `#00ff00` |
+| 3     | Yellow  | `#ffff00` |
+| 4     | Blue    | `#0000ff` |
+| 5     | Magenta | `#ff00ff` |
+| 6     | Cyan    | `#00ffff` |
+| 7     | White   | `#ffffff` |
+
+The index bits are BGR: bit 2 = blue, bit 1 = green, bit 0 = red. Index `0` is
+black and can be used as the background/off color. Indices `8–15` are not
+displayable by the panel.
+
+The 16-color table below belongs to the companion preview GIF
+(`palette16_lines_96x16.gif`) and is **not** the hardware palette.
+
 ## File Layout Summary
 
 ```mermaid
@@ -280,7 +305,7 @@ title Frame Data Layout (0x09A4 - 0x69A3)
 | Count          | 32                                                   |                        |                                                                                                                   |
 | Size per frame | 768 bytes (`0x300`) = 16 rows × 48 bytes             |                        |                                                                                                                   |
 | Row size       | 48 bytes = 96 pixels @ 4 bits/pixel                  |                        |                                                                                                                   |
-| Packing        | 2 pixels per byte (4bpp). Each byte = `(pix1 << 4) \ | pix0` or `(pix0 << 4)\ | pix1` depending on convention; in sample both nibbles equal (`0x00,0x11,...,0x77`) so order not directly visible. |
+| Packing        | 2 pixels per byte (4bpp). The panel treats the **low nibble as the left pixel** of each pair: each byte = `(right << 4) \| left` = `(pix1 << 4) \| pix0`. In the sample both nibbles are equal (`0x00,0x11,...,0x77`) because every color bar is an even number of pixels wide, so nibble order is not directly visible there. |
 | Total          | 32 × 768 = 24576 bytes = `0x6000`                    |                        |                                                                                                                   |
 
 ### Frame 0 decode (offset `0x09A4`)
@@ -289,20 +314,20 @@ title Frame Data Layout (0x09A4 - 0x69A3)
 |-----|---------------------|--------------|
 | 0   | `0 × 96`            | Black        |
 | 1   | `0 × 96`            | Black        |
-| 2   | `7 × 96`            | Yellow       |
-| 3   | `7 × 96`            | Yellow       |
-| 4   | `1 × 96`            | Dark gray    |
-| 5   | `1 × 96`            | Dark gray    |
-| 6   | `1 × 96`            | Dark gray    |
-| 7   | `3 × 96`            | White        |
-| 8   | `2 × 96`            | Light gray   |
-| 9   | `2 × 96`            | Light gray   |
-| 10  | `6 × 96`            | Brown/orange |
-| 11  | `6 × 96`            | Brown/orange |
-| 12  | `4 × 96`            | Dark red     |
-| 13  | `4 × 96`            | Dark red     |
-| 14  | `5 × 96`            | Light red    |
-| 15  | `5 × 96`            | Light red    |
+| 2   | `7 × 96`            | White        |
+| 3   | `7 × 96`            | White        |
+| 4   | `1 × 96`            | Red          |
+| 5   | `1 × 96`            | Red          |
+| 6   | `1 × 96`            | Red          |
+| 7   | `3 × 96`            | Yellow       |
+| 8   | `2 × 96`            | Green        |
+| 9   | `2 × 96`            | Green        |
+| 10  | `6 × 96`            | Cyan         |
+| 11  | `6 × 96`            | Cyan         |
+| 12  | `4 × 96`            | Blue         |
+| 13  | `4 × 96`            | Blue         |
+| 14  | `5 × 96`            | Magenta      |
+| 15  | `5 × 96`            | Magenta      |
 
 **Notes:**
 - The first 96 bytes (`0x09A4–0x0A03`) correspond to rows 0–1 (black). This region overlaps with the last descriptor’s unused 8-byte trailer area.
@@ -402,7 +427,7 @@ The related GIF uses this 16-color table. USB.FXD stores palette indices only; n
 
 - Importer reads count from `0x34A`, delay from `0x352`, and frame offsets from the descriptor table (`stored + 0x200`).
 - Exporter writes a fixed 32-slot file (`0x6A10` bytes). Animations with fewer than 32 frames repeat the last frame in unused slots; animations with more than 32 frames are rejected.
-- Exporter uses the first frame's duration as the file-wide delay field (USB.FXD stores one global delay).
+- USB.FXD stores one global delay, so the exporter represents per-frame durations by repeating source frames. It uses the frames' common divisor as the slot delay when the expanded timeline fits in 32 slots; otherwise it picks the delay that minimizes the total timing error. For example, three frames of 500/1000/800 ms are exported as 5/10/8 slots of 100 ms each.
 - Round-trip test confirms importing the observed `USB.FXD` and exporting it again preserves metadata, descriptors, all 32 frames, and the footer.
 
 ### Corrected frame-0 decode (offset 0x09A4)
@@ -535,7 +560,10 @@ found in the sections examined. Only indices 0–7 occur in this sample.
 - The exporter writes a fixed 32-slot file (`0x6A10` bytes). Animations with
   fewer than 32 frames repeat the last frame in the unused slots; animations with
   more than 32 frames are rejected.
-- The exporter uses the first frame's duration as the file-wide 250 ms-style
-  delay field, since USB.FXD stores one delay for the whole animation.
+- USB.FXD stores one global delay, so the exporter represents per-frame
+  durations by repeating source frames. It uses the frames' common divisor as
+  the slot delay when the expanded timeline fits in 32 slots; otherwise it picks
+  the delay that minimizes the total timing error. For example, three frames of
+  500/1000/800 ms are exported as 5/10/8 slots of 100 ms each.
 - A round-trip test confirms that importing the observed `USB.FXD` and exporting
   it again preserves all metadata, descriptors, all 32 frames, and the footer.

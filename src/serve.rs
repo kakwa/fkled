@@ -2,8 +2,8 @@ use anyhow::Result;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ledfx_editor::export;
+use ledfx_editor::font::{self, Font};
 use ledfx_editor::model::Animation;
-use ledfx_editor::pcf::{self, PcfFont};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -104,7 +104,7 @@ struct FilePayload {
 
 #[derive(Serialize)]
 struct FontPayload {
-    font: PcfFont,
+    font: Font,
 }
 
 #[derive(Serialize)]
@@ -163,7 +163,7 @@ fn route_api(request: &mut Request, method: &str, path: &str) -> ApiResult {
         ("POST", "/api/fonts/parse") => {
             let payload: DataPayload = read_json(request)?;
             let bytes = decode_base64(&payload.data)?;
-            let font = pcf::load_pcf_bytes(&bytes).map_err(|error| (400, error.to_string()))?;
+            let font = font::parse_font_bytes(&bytes).map_err(|error| (400, error.to_string()))?;
             Ok(json_ok(&FontPayload { font }))
         }
         _ if path == "/api" || path.starts_with("/api/") => {
