@@ -229,7 +229,7 @@ fn write_footer(buf: &mut [u8]) {
     write_utf16(buf, f + 0x58, "Animation0");
 }
 
-pub fn export_usb_fxd(anim: &Animation, path: &str) -> Result<()> {
+pub fn export_usb_fxd_bytes(anim: &Animation) -> Result<Vec<u8>> {
     if anim.frames.is_empty() {
         bail!("cannot export USB.FXD: animation has no frames");
     }
@@ -309,27 +309,28 @@ pub fn export_usb_fxd(anim: &Animation, path: &str) -> Result<()> {
 
     write_footer(&mut buf);
 
+    Ok(buf)
+}
+
+pub fn export_usb_fxd(anim: &Animation, path: &str) -> Result<()> {
+    let buf = export_usb_fxd_bytes(anim)?;
     let mut file = File::create(path)?;
     file.write_all(&buf)?;
     Ok(())
 }
 
-pub fn import_usb_fxd(path: &str) -> Result<Animation> {
-    let mut file = File::open(path)?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
-
+pub fn import_usb_fxd_bytes(data: &[u8]) -> Result<Animation> {
     if data.len() < 0x360 {
         bail!("not a USB.FXD file: only {} bytes", data.len());
     }
 
-    let width = get_u16(&data, 0x08)? as usize;
-    let height = get_u16(&data, 0x0A)? as usize;
+    let width = get_u16(data, 0x08)? as usize;
+    let height = get_u16(data, 0x0A)? as usize;
     if width != WIDTH || height != HEIGHT {
         bail!("unsupported USB.FXD dimensions: {width}x{height} (expected 96x16)");
     }
 
-    let frame_count = detect_frame_count(&data).unwrap_or(0);
+    let frame_count = detect_frame_count(data).unwrap_or(0);
     if frame_count == 0 {
         bail!("USB.FXD contains no frames");
     }
@@ -339,15 +340,15 @@ pub fn import_usb_fxd(path: &str) -> Result<Animation> {
         );
     }
 
-    let delay_ms = get_u16(&data, 0x352).unwrap_or(0);
-    let (frame_bytes, row_bytes) = descriptor_geometry(&data).unwrap_or((FRAME_BYTES, ROW_BYTES));
+    let delay_ms = get_u16(data, 0x352).unwrap_or(0);
+    let (frame_bytes, row_bytes) = descriptor_geometry(data).unwrap_or((FRAME_BYTES, ROW_BYTES));
 
-    let pixel_limit = pixel_data_limit(&data);
+    let pixel_limit = pixel_data_limit(data);
     let mut frames = Vec::with_capacity(frame_count);
 
     for index in 0..frame_count {
         let fallback_offset = FIRST_FRAME_OFFSET + index * frame_bytes;
-        let offset = descriptor_frame_offset(&data, index)
+        let offset = descriptor_frame_offset(data, index)
             .filter(|&offset| offset >= FIRST_FRAME_OFFSET && offset < pixel_limit)
             .unwrap_or(fallback_offset);
 
@@ -363,7 +364,7 @@ pub fn import_usb_fxd(path: &str) -> Result<Animation> {
     }
 
     let mut name = "Imported USB.FXD".to_string();
-    if let Some(display_name) = read_utf16_z(&data, 0x20C) {
+    if let Some(display_name) = read_utf16_z(data, 0x20C) {
         if !display_name.is_empty() {
             name = display_name;
         }
@@ -372,42 +373,59 @@ pub fn import_usb_fxd(path: &str) -> Result<Animation> {
     Ok(Animation { frames, name })
 }
 
-pub fn export_gif(anim: &Animation, path: &str) -> Result<()> {
-    let file = File::create(path)?;
-    let mut encoder = gif::Encoder::new(file, 96, 16, &[])?;
-    encoder.set_repeat(gif::Repeat::Infinite)?;
-
-    for frame in &anim.frames {
-        let mut frame_data: Vec<u8> = vec![0u8; 96 * 16];
-        for row in 0..16 {
-            for col in 0..96 {
-                frame_data[row * 96 + col] = frame.pixels[row][col] & 0x0F;
-            }
-        }
-        let palette_vec: Vec<u8> = vec![
-            0, 0, 0, 85, 85, 85, 170, 170, 170, 255, 255, 255, 170, 0, 0, 255, 85, 85, 170, 85, 0,
-            255, 255, 85, 0, 170, 0, 85, 255, 85, 0, 170, 170, 85, 255, 255, 0, 0, 170, 85, 85,
-            255, 170, 0, 170, 255, 85, 255,
-        ];
-        let mut gif_frame = gif::Frame::from_palette_pixels(96, 16, frame_data, palette_vec, None);
-        gif_frame.delay = (frame.duration_ms / 10) as u16;
-        encoder.write_frame(&gif_frame)?;
-    }
-
-    Ok(())
-}
-
-pub fn import_gif(path: &str) -> Result<Animation> {
-    use crate::palette::Palette;
-    let palette = Palette::default();
-
+pub fn import_usb_fxd(path: &str) -> Result<Animation> {
     let mut file = File::open(path)?;
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
+    import_usb_fxd_bytes(&data)
+}
+
+pub fn export_gif_bytes(anim: &Animation) -> Result<Vec<u8>> {
+    if anim.frames.is_empty() {
+        bail!("cannot export GIF: animation has no frames");
+    }
+
+    let mut output = Vec::new();
+    {
+        let mut encoder = gif::Encoder::new(&mut output, 96, 16, &[])?;
+        encoder.set_repeat(gif::Repeat::Infinite)?;
+
+        for frame in &anim.frames {
+            let mut frame_data: Vec<u8> = vec![0u8; 96 * 16];
+            for row in 0..16 {
+                for col in 0..96 {
+                    frame_data[row * 96 + col] = frame.pixels[row][col] & 0x0F;
+                }
+            }
+            let palette_vec: Vec<u8> = vec![
+                0, 0, 0, 85, 85, 85, 170, 170, 170, 255, 255, 255, 170, 0, 0, 255, 85, 85, 170, 85,
+                0, 255, 255, 85, 0, 170, 0, 85, 255, 85, 0, 170, 170, 85, 255, 255, 0, 0, 170, 85,
+                85, 255, 170, 0, 170, 255, 85, 255,
+            ];
+            let mut gif_frame =
+                gif::Frame::from_palette_pixels(96, 16, frame_data, palette_vec, None);
+            gif_frame.delay = (frame.duration_ms / 10) as u16;
+            encoder.write_frame(&gif_frame)?;
+        }
+    }
+
+    Ok(output)
+}
+
+pub fn export_gif(anim: &Animation, path: &str) -> Result<()> {
+    let data = export_gif_bytes(anim)?;
+    let mut file = File::create(path)?;
+    file.write_all(&data)?;
+    Ok(())
+}
+
+pub fn import_gif_bytes(data: &[u8]) -> Result<Animation> {
+    use crate::palette::Palette;
+    let palette = Palette::default();
 
     let mut decoder = gif::DecodeOptions::new();
     decoder.set_color_output(gif::ColorOutput::Indexed);
-    let mut reader = decoder.read_info(&data[..])?;
+    let mut reader = decoder.read_info(data)?;
 
     let mut frames = Vec::new();
     while let Some(frame) = reader.read_next_frame()? {
@@ -453,6 +471,13 @@ pub fn import_gif(path: &str) -> Result<Animation> {
         frames,
         name: "Imported GIF".to_string(),
     })
+}
+
+pub fn import_gif(path: &str) -> Result<Animation> {
+    let mut file = File::open(path)?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
+    import_gif_bytes(&data)
 }
 
 pub fn save_project(anim: &Animation, path: &str) -> Result<()> {

@@ -1,11 +1,12 @@
 use anyhow::{anyhow, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::GzDecoder;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Cursor, Read};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct PcfFont {
     pub glyphs: HashMap<char, Glyph>,
     pub default_char: Option<char>,
@@ -13,7 +14,7 @@ pub struct PcfFont {
     pub max_height: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Glyph {
     pub width: u32,
     pub height: u32,
@@ -28,25 +29,15 @@ pub struct Glyph {
 #[derive(Clone, Debug)]
 struct PcfTable {
     _type: u32,
-    format: u32,
-    size: u32,
+    _format: u32,
+    _size: u32,
     offset: u32,
 }
 
 // PCF constants
-const PCF_PROPERTIES: u32 = (1 << 0);
-const PCF_ACCELERATORS: u32 = (1 << 1);
-const PCF_METRICS: u32 = (1 << 2);
-const PCF_BITMAPS: u32 = (1 << 3);
-const PCF_INK_METRICS: u32 = (1 << 4);
-const PCF_BDF_ENCODINGS: u32 = (1 << 5);
-const PCF_SWIDTHS: u32 = (1 << 6);
-const PCF_GLYPH_NAMES: u32 = (1 << 7);
-const PCF_BDF_ACCELERATORS: u32 = (1 << 8);
-
-const PCF_DEFAULT_FORMAT: u32 = 0x00000000;
-const PCF_INKBOUNDS: u32 = 0x00000200;
-const PCF_ACCEL_W_INKBOUNDS: u32 = 0x00000100;
+const PCF_METRICS: u32 = 1 << 2;
+const PCF_BITMAPS: u32 = 1 << 3;
+const PCF_BDF_ENCODINGS: u32 = 1 << 5;
 const PCF_COMPRESSED_METRICS: u32 = 0x00000100;
 const PCF_BYTE_MASK: u32 = 0x00000001;
 const PCF_BIT_MASK: u32 = 0x00000002;
@@ -56,17 +47,20 @@ pub fn load_pcf(path: &str) -> Result<PcfFont> {
     let mut file = File::open(path)?;
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
+    load_pcf_bytes(&data)
+}
 
+/// Parse a PCF font from raw bytes (optionally gzip-compressed).
+pub fn load_pcf_bytes(data: &[u8]) -> Result<PcfFont> {
     // Check if gzipped
-    if data.starts_with(&[0x1f, 0x8b]) {
-        let decoded_data = {
-            let mut decoder = GzDecoder::new(&data[..]);
-            let mut tmp = Vec::new();
-            decoder.read_to_end(&mut tmp)?;
-            tmp
-        };
-        data = decoded_data;
-    }
+    let data = if data.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = GzDecoder::new(data);
+        let mut tmp = Vec::new();
+        decoder.read_to_end(&mut tmp)?;
+        tmp
+    } else {
+        data.to_vec()
+    };
 
     let mut cursor = Cursor::new(data);
 
@@ -86,8 +80,8 @@ pub fn load_pcf(path: &str) -> Result<PcfFont> {
         let offset = cursor.read_u32::<LittleEndian>()?;
         tables.push(PcfTable {
             _type: ttype,
-            format,
-            size,
+            _format: format,
+            _size: size,
             offset,
         });
     }
@@ -109,7 +103,7 @@ pub fn load_pcf(path: &str) -> Result<PcfFont> {
     // Parse encodings
     let mut enc_cursor = Cursor::new(cursor.get_ref().clone());
     enc_cursor.set_position(encodings_table.offset as u64);
-    let enc_format = enc_cursor.read_u32::<LittleEndian>()?;
+    let _enc_format = enc_cursor.read_u32::<LittleEndian>()?;
     let first_col = enc_cursor.read_u16::<LittleEndian>()? as u16;
     let last_col = enc_cursor.read_u16::<LittleEndian>()? as u16;
     let first_row = enc_cursor.read_u16::<LittleEndian>()? as u16;
@@ -143,7 +137,7 @@ pub fn load_pcf(path: &str) -> Result<PcfFont> {
         character_width: i16,
         ascent: i16,
         descent: i16,
-        attributes: u16,
+        _attributes: u16,
     }
 
     let mut metrics: Vec<Metric> = Vec::new();
@@ -160,7 +154,7 @@ pub fn load_pcf(path: &str) -> Result<PcfFont> {
                 character_width,
                 ascent,
                 descent,
-                attributes: 0,
+                _attributes: 0,
             });
         }
     } else {
@@ -177,7 +171,7 @@ pub fn load_pcf(path: &str) -> Result<PcfFont> {
                 character_width,
                 ascent,
                 descent,
-                attributes,
+                _attributes: attributes,
             });
         }
     }
@@ -197,7 +191,7 @@ pub fn load_pcf(path: &str) -> Result<PcfFont> {
     }
 
     let glyph_pad = (bmp_format & PCF_GLYPH_PAD_MASK) as usize;
-    let byte_swap = (bmp_format & PCF_BYTE_MASK) != 0;
+    let _byte_swap = (bmp_format & PCF_BYTE_MASK) != 0;
     let bit_swap = (bmp_format & PCF_BIT_MASK) != 0;
 
     let mut glyph_bitmaps: Vec<Vec<u8>> = Vec::new();
@@ -254,7 +248,7 @@ pub fn load_pcf(path: &str) -> Result<PcfFont> {
                     for col in 0..width as usize {
                         let byte_idx = r * row_size + (col / 8);
                         if byte_idx < bitmap_data.len() {
-                            let bit = if bit_swap { (col % 8) } else { 7 - (col % 8) };
+                            let bit = if bit_swap { col % 8 } else { 7 - (col % 8) };
                             if (bitmap_data[byte_idx] & (1 << bit)) != 0 {
                                 bitmap[r][col] = true;
                             }
